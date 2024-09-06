@@ -5,7 +5,6 @@ maxminddb.reader
 This module contains the pure Python database reader and related classes.
 
 """
-
 try:
     import mmap
 except ImportError:
@@ -16,7 +15,7 @@ import ipaddress
 import struct
 from ipaddress import IPv4Address, IPv6Address
 from os import PathLike
-from typing import Any, AnyStr, Dict, IO, List, Optional, Tuple, Union
+from typing import Any, AnyStr, IO, Optional, Tuple, Union
 
 from maxminddb.const import MODE_AUTO, MODE_MMAP, MODE_FILE, MODE_MEMORY, MODE_FD
 from maxminddb.decoder import Decoder
@@ -29,7 +28,7 @@ _IPV4_MAX_NUM = 2**32
 
 class Reader:
     """
-    A pure Python implementation of a reader for the MaxMind DB format. IP
+    Instances of this class provide a reader for the MaxMind DB format. IP
     addresses can be looked up using the ``get`` method.
     """
 
@@ -216,6 +215,25 @@ class Reader:
 
         raise InvalidDatabaseError("Invalid node in search tree")
 
+    def _find_address_in_tree_loc(self, packed: bytearray) -> Tuple[int, int]:
+        bit_count = len(packed) * 8
+        node = (self._start_node(bit_count),0)
+        node_count = self._metadata.node_count
+
+        i = 0
+        while i < bit_count and node[0] < node_count:
+            bit = 1 & (packed[i >> 3] >> 7 - (i % 8))
+            node = self._read_node_loc(node[0], bit)
+            i = i + 1
+
+        if node[0] == node_count:
+            # Record is empty
+            return 0, i
+        if node[0] > node_count:
+            return node, i
+
+        raise InvalidDatabaseError("Invalid node in search tree")
+
     def _start_node(self, length: int) -> int:
         if self._metadata.ip_version == 6 and length == 32:
             return self._ipv4_start
@@ -243,6 +261,28 @@ class Reader:
             raise InvalidDatabaseError(f"Unknown record size: {record_size}")
         return struct.unpack(b"!I", node_bytes)[0]
 
+    def _read_node_loc(self, node_number: int, index: int) -> int:
+        base_offset = node_number * self._metadata.node_byte_size
+
+        record_size = self._metadata.record_size
+        if record_size == 24:
+            offset = base_offset + index * 3
+            node_bytes = b"\x00" + self._buffer[offset : offset + 3]
+        elif record_size == 28:
+            offset = base_offset + 3 * index
+            node_bytes = bytearray(self._buffer[offset : offset + 4])
+            if index:
+                node_bytes[0] = 0x0F & node_bytes[0]
+            else:
+                middle = (0xF0 & node_bytes.pop()) >> 4
+                node_bytes.insert(0, middle)
+        elif record_size == 32:
+            offset = base_offset + index * 4
+            node_bytes = self._buffer[offset : offset + 4]
+        else:
+            raise InvalidDatabaseError(f"Unknown record size: {record_size}")
+        return (struct.unpack(b"!I", node_bytes)[0],offset)
+
     def _resolve_data_pointer(self, pointer: int) -> Record:
         resolved = pointer - self._metadata.node_count + self._metadata.search_tree_size
 
@@ -269,59 +309,71 @@ class Reader:
         return self
 
 
-# pylint: disable=too-many-instance-attributes,R0801
 class Metadata:
-    """Metadata for the MaxMind DB reader"""
+    """Metadata for the MaxMind DB reader
 
-    binary_format_major_version: int
-    """
-    The major version number of the binary format used when creating the
-    database.
+
+    .. attribute:: binary_format_major_version
+
+      The major version number of the binary format used when creating the
+      database.
+
+      :type: int
+
+    .. attribute:: binary_format_minor_version
+
+      The minor version number of the binary format used when creating the
+      database.
+
+      :type: int
+
+    .. attribute:: build_epoch
+
+      The Unix epoch for the build time of the database.
+
+      :type: int
+
+    .. attribute:: database_type
+
+      A string identifying the database type, e.g., "GeoIP2-City".
+
+      :type: str
+
+    .. attribute:: description
+
+      A map from locales to text descriptions of the database.
+
+      :type: dict(str, str)
+
+    .. attribute:: ip_version
+
+      The IP version of the data in a database. A value of "4" means the
+      database only supports IPv4. A database with a value of "6" may support
+      both IPv4 and IPv6 lookups.
+
+      :type: int
+
+    .. attribute:: languages
+
+      A list of locale codes supported by the databse.
+
+      :type: list(str)
+
+    .. attribute:: node_count
+
+      The number of nodes in the database.
+
+      :type: int
+
+    .. attribute:: record_size
+
+      The bit size of a record in the search tree.
+
+      :type: int
+
     """
 
-    binary_format_minor_version: int
-    """
-    The minor version number of the binary format used when creating the
-    database.
-    """
-
-    build_epoch: int
-    """
-    The Unix epoch for the build time of the database.
-    """
-
-    database_type: str
-    """
-    A string identifying the database type, e.g., "GeoIP2-City".
-    """
-
-    description: Dict[str, str]
-    """
-    A map from locales to text descriptions of the database.
-    """
-
-    ip_version: int
-    """
-    The IP version of the data in a database. A value of "4" means the
-    database only supports IPv4. A database with a value of "6" may support
-    both IPv4 and IPv6 lookups.
-    """
-
-    languages: List[str]
-    """
-    A list of locale codes supported by the databse.
-    """
-
-    node_count: int
-    """
-    The number of nodes in the database.
-    """
-
-    record_size: int
-    """
-    The bit size of a record in the search tree.
-    """
-
+    # pylint: disable=too-many-instance-attributes
     def __init__(self, **kwargs) -> None:
         """Creates new Metadata object. kwargs are key/value pairs from spec"""
         # Although I could just update __dict__, that is less obvious and it
